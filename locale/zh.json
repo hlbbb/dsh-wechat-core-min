@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "微信本地消息读取",
+    "description": "把 wechat-core-min 的微信 4.x 本地库只读核心（账号 / 会话 / 消息 / 联系人 / 群成员）暴露为 Agent 工具。"
+  }
+}

@@ -1,0 +1,4 @@
+- insert:
+    - id: dsh-wechat-core-min
+      name: dsh-wechat-core-min
+      config: {}

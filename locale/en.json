@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "WeChat Local Reader",
+    "description": "Exposes the read-only wechat-core-min core (accounts / sessions / messages / contacts / group members) as Agent tools."
+  }
+}
