@@ -11,15 +11,19 @@ import {
   runWchatCore,
 } from "../runner.js";
 
-const config = {};
-
+const dataDir = String(process.env.WCHAT_E2E_DATA_DIR ?? "").trim();
+const config = { dataDir };
 const coreDir = resolveCoreDir(config);
 console.log("coreDir :", coreDir);
 console.log("python  :", JSON.stringify(await resolveInterpreter(config, coreDir)));
 console.log("source  :", resolvePythonSource(config, coreDir));
+if (!dataDir) {
+  console.log("跳过数据链路：未设置 WCHAT_E2E_DATA_DIR（指向含 account_keys.json 的微信数据目录）；仅验证解释器解析。");
+  process.exit(0);
+}
 console.log("dataDir :", resolveDataDir(config));
 
-const common = ["--data-dir", resolveDataDir(config), "--compact"];
+const common = ["--data-dir", dataDir, "--compact"];
 
 const accounts = parseCliResult(
   await runWchatCore(config, "accounts", common, { timeoutMs: 120000 }),

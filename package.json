@@ -1,6 +1,6 @@
 {
   "name": "dsh-wechat-core-min",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "DSH 插件：把 wechat-core-min（微信 4.x 本地数据库只读核心）暴露为 Agent 可调用的工具",
   "type": "module",
   "license": "MIT",

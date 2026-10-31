@@ -12,7 +12,7 @@ export const Config = z.object({
   dataDir: z
     .string()
     .default("")
-    .description("微信数据目录（需含 account_keys.json 与 databases/）。留空时依次尝试环境变量 WCHAT_DATA_DIR 与内置默认路径。"),
+    .description("微信数据目录（需含 account_keys.json 与 databases/，由微信数据导出主程序生成）。未配置且未设环境变量 WCHAT_DATA_DIR 时，工具会报可操作错误提示配置方法。"),
   coreDir: z
     .string()
     .default("")

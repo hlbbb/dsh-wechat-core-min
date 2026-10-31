@@ -21,11 +21,34 @@ const coreDir = resolveCoreDir({});
 if (coreDir !== null) {
   throw new Error(`应回退内置源码（resolveCoreDir=null），实际返回：${coreDir}`);
 }
-const config = { dataDir: String(process.env.WCHAT_E2E_DATA_DIR ?? "").trim() };
-const source = resolvePythonSource(config, null);
+const source = resolvePythonSource({}, null);
 console.log("coreDir: null（内置回退）| source:", source);
+
+// 数据目录三个异常分支：未配置 / 目录不存在 / 缺 account_keys.json，都必须给可操作错误。
+const missingDir = join(tmpdir(), "dsh-wchat-nonexistent-data");
+const emptyDir = join(tmpdir(), "dsh-wchat-empty-data");
+const { mkdirSync } = await import("node:fs");
+mkdirSync(emptyDir, { recursive: true });
+
+async function expectError(label, config, needle) {
+  try {
+    await runWchatCore(config, "accounts", ["--compact"], { timeoutMs: 30000 });
+    throw new Error(`${label}：应当抛错却没有`);
+  } catch (error) {
+    if (!String(error.message).includes(needle)) {
+      throw new Error(`${label}：错误文案不含「${needle}」，实际：${error.message}`);
+    }
+    console.log(`${label} ok:`, String(error.message).slice(0, 60), "…");
+  }
+}
+
+await expectError("未配置 dataDir", {}, "未配置微信数据目录");
+await expectError("目录不存在", { dataDir: missingDir }, "微信数据目录不存在");
+await expectError("缺 account_keys.json", { dataDir: emptyDir }, "缺少 account_keys.json");
+
+const config = { dataDir: String(process.env.WCHAT_E2E_DATA_DIR ?? "").trim() };
 if (!config.dataDir) {
-  console.log("跳过数据链路：未设置 WCHAT_E2E_DATA_DIR（指向含 account_keys.json 的微信数据目录）；仅验证环境自举与无 Python 分支。");
+  console.log("跳过数据链路：未设置 WCHAT_E2E_DATA_DIR（指向含 account_keys.json 的微信数据目录）；仅验证环境自举与异常分支。");
 }
 
 if (config.dataDir) {

@@ -55,7 +55,7 @@
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
-| `dataDir` | `""` | 微信数据目录；留空依次尝试环境变量 `WCHAT_DATA_DIR` 与内置默认路径 |
+| `dataDir` | `""` | 微信数据目录（需含 `account_keys.json` 与 `databases/`）；未配置且未设环境变量 `WCHAT_DATA_DIR` 时，工具报可操作错误提示配置方法 |
 | `coreDir` | `""` | wchat-core 项目目录（需含 `wchat_core` 包，推荐有 `.venv`）；留空时默认路径存在则用之，否则回退插件内置源码 |
 | `pythonExecutable` | `""` | Python 解释器；留空自动探测：coreDir 的 `.venv` → 自动运行时 venv → 系统 `python`/`python3`/`py`（缺依赖自动建环境） |
 | `timeoutMs` | `180000` | 单次调用的超时毫秒数；首次解密大库可能耗时较长 |

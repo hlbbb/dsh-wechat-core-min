@@ -8,10 +8,8 @@ import { fileURLToPath } from "node:url";
 const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
 /** 插件内置的 wchat_core 源码目录（别的电脑无需单独 clone wchat-core 项目）。 */
 export const BUNDLED_CORE_DIR = join(PLUGIN_DIR, "python");
-/** 默认的 wchat-core 项目目录（按用户主目录推断，可用 Config.coreDir 覆盖）。 */
+/** 默认的 wchat-core 项目目录（按用户主目录推断，可用 Config.coreDir 覆盖）；不存在时安全回退插件内置源码。 */
 export const DEFAULT_CORE_DIR = join(homedir(), "Documents", "projects", "wechat-core-min");
-/** 默认的微信数据目录（按用户主目录推断，可用 Config.dataDir 或环境变量 WCHAT_DATA_DIR 覆盖）。 */
-export const DEFAULT_DATA_DIR = join(homedir(), "Documents", "projects", "WeChatDataAnalysis", "output");
 /** 自动创建的运行时虚拟环境位置（可用环境变量 WCHAT_RUNTIME_DIR 覆盖）。 */
 export const DEFAULT_RUNTIME_DIR = join(
   String(process.env.LOCALAPPDATA || "").trim() || join(homedir(), "AppData", "Local"),
@@ -41,13 +39,29 @@ export function resolvePythonSource(config, coreDir = resolveCoreDir(config)) {
   return coreDir ?? BUNDLED_CORE_DIR;
 }
 
-/** 解析微信数据目录：配置项 → 环境变量 WCHAT_DATA_DIR → 内置默认。 */
+/**
+ * 解析微信数据目录：插件配置 → 环境变量 WCHAT_DATA_DIR；均未设置时返回 ""。
+ * 不提供编造的默认路径——数据目录由微信数据导出主程序生成、位置因机器而异，
+ * 缺失时由 validateDataDir 给出可操作报错。
+ */
 export function resolveDataDir(config = {}) {
   const raw = String(config.dataDir ?? "").trim();
   if (raw) return raw;
-  const env = String(process.env.WCHAT_DATA_DIR ?? "").trim();
-  if (env) return env;
-  return DEFAULT_DATA_DIR;
+  return String(process.env.WCHAT_DATA_DIR ?? "").trim();
+}
+
+/** 校验微信数据目录：目录须存在且含 account_keys.json（本插件不接触密钥，密钥文件是 CLI 的必需输入）。 */
+export function validateDataDir(dataDir) {
+  if (!existsSync(dataDir)) {
+    throw new Error(
+      `微信数据目录不存在：${dataDir}。请把插件配置 dataDir（或环境变量 WCHAT_DATA_DIR）指向包含 account_keys.json 与 databases/ 的微信数据导出目录；目录如何生成见插件 README「在其他电脑部署」。`,
+    );
+  }
+  if (!existsSync(join(dataDir, "account_keys.json"))) {
+    throw new Error(
+      `微信数据目录缺少 account_keys.json：${dataDir}。请把 dataDir 指向微信数据导出主程序生成的目录（应包含 account_keys.json 与 databases/）。`,
+    );
+  }
 }
 
 function venvInterpreter(venvDir) {
@@ -288,6 +302,13 @@ function decode(chunks, totalBytes) {
  * @returns {Promise<{code: number|null, signal: string|null, timedOut: boolean, truncated: boolean, stdout: string, stderr: string}>}
  */
 export async function runWchatCore(config, command, flags, { signal, timeoutMs } = {}) {
+  const dataDir = resolveDataDir(config);
+  if (!dataDir) {
+    throw new Error(
+      "未配置微信数据目录。请把插件配置 dataDir 或环境变量 WCHAT_DATA_DIR 指向包含 account_keys.json 与 databases/ 的微信数据导出目录（生成方式见插件 README「在其他电脑部署」）。",
+    );
+  }
+  validateDataDir(dataDir);
   const coreDir = resolveCoreDir(config);
   const source = resolvePythonSource(config, coreDir);
   const python = await resolveInterpreter(config, coreDir, signal);
