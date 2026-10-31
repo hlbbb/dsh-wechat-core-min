@@ -135,6 +135,50 @@ def account_dir(data_dir: Path, account: str) -> Path:
     return Path(data_dir) / "databases" / account
 
 
+# ---- 插件补丁（dsh-wechat-core-min）：微信 4.1+ 每个数据库使用独立密钥 ----
+def account_db_key_map(data_dir: Path, account: str) -> dict[str, str]:
+    """读取账号级「按库密钥映射」（salt(hex) -> enc_key(hex)）；没有时返回空字典。
+
+    account_keys.json 条目形如 {"db_keys": {"<salt 32hex>": "<key 64hex>", ...}}。
+    """
+    store = load_key_store(data_dir)
+    candidates = [account]
+    canonical = _canonical_account(account)
+    candidates.extend(name for name in store if _canonical_account(name) == canonical)
+    for name in candidates:
+        item = store.get(name)
+        if not isinstance(item, dict):
+            continue
+        raw = item.get("db_keys")
+        if not isinstance(raw, dict):
+            continue
+        out: dict[str, str] = {}
+        for salt, key in raw.items():
+            salt_hex = str(salt or "").strip().lower()
+            key_hex = str(key or "").strip().lower()
+            if re.fullmatch(r"[0-9a-f]{32}", salt_hex) and re.fullmatch(r"[0-9a-f]{64}", key_hex):
+                out[salt_hex] = key_hex
+        if out:
+            return out
+    return {}
+
+
+def _file_salt_hex(path: Path) -> str:
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(16).hex()
+    except OSError:
+        return ""
+
+
+def account_key_optional(data_dir: Path, account: str, override: str | None = None) -> str:
+    """同 account_key，但缺少账号级密钥时返回空串（供按库密钥场景使用）。"""
+    try:
+        return account_key(data_dir, account, override)
+    except SystemExit:
+        return ""
+
+
 def source_storage(data_dir: Path, account: str) -> Path | None:
     source_path = account_dir(data_dir, account) / SOURCE_FILE_NAME
     if not source_path.is_file():
@@ -276,7 +320,16 @@ def ensure_cache(
     )
     cache_dir = (root / account).resolve()
     cache_dir.mkdir(parents=True, exist_ok=True)
-    key = account_key(data_dir, account, key_override)
+    key = account_key_optional(data_dir, account, key_override)
+    db_key_map = account_db_key_map(data_dir, account)
+    # 显式 --key / WCHAT_DB_KEY 优先于按库密钥映射
+    if key_override or os.environ.get("WCHAT_DB_KEY"):
+        db_key_map = {}
+    if not key and not db_key_map:
+        raise SystemExit(
+            f"No database key for {account} in {Path(data_dir) / KEY_STORE_NAME}. "
+            "Pass --key or WCHAT_DB_KEY."
+        )
 
     sources: dict[str, Path] = {}
     contact = _source_database(storage, "contact", "contact.db")
@@ -306,7 +359,9 @@ def ensure_cache(
             or cached_stamp != stamp
         )
         if needs_decrypt:
-            _decrypt_with_retry(key, source, destination)
+            # 微信 4.1+：优先按该库自身 salt 取专属密钥；否则使用账号级密钥
+            per_db_key = db_key_map.get(_file_salt_hex(source)) or key
+            _decrypt_with_retry(per_db_key, source, destination)
             meta["files"][name] = stamp
             _save_meta(meta_path, meta)
 

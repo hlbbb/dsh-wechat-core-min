@@ -16,6 +16,12 @@ export const DEFAULT_RUNTIME_DIR = join(
   "dsh-wechat-core-min",
   "runtime",
 );
+/** 插件自管的数据目录：自动引导生成的 account_keys.json 与 databases/ 存放处（可用 WCHAT_PLUGIN_DATA_DIR 覆盖）。 */
+export const PLUGIN_DATA_DIR = String(process.env.WCHAT_PLUGIN_DATA_DIR || "").trim() || join(
+  String(process.env.LOCALAPPDATA || "").trim() || join(homedir(), "AppData", "Local"),
+  "dsh-wechat-core-min",
+  "data",
+);
 /** 首次自动准备环境（创建 venv + 安装依赖）允许的最长时间。 */
 const ENV_SETUP_TIMEOUT_MS = 600000;
 /** 依赖最小集：装好这些，wchat_core 即可运行。 */
@@ -34,9 +40,12 @@ export function resolveCoreDir(config = {}) {
   return null;
 }
 
-/** 解析 Python 源码所在目录（cwd 与 PYTHONPATH）：外部项目优先，回退插件内置。 */
-export function resolvePythonSource(config, coreDir = resolveCoreDir(config)) {
-  return coreDir ?? BUNDLED_CORE_DIR;
+/**
+ * 解析 Python 源码目录：代码固定使用插件内置版本（含微信 4.1+ 按库密钥等必要补丁），
+ * 确保任何机器上行为一致；coreDir 仅用于探测外部项目的 venv 解释器。
+ */
+export function resolvePythonSource() {
+  return BUNDLED_CORE_DIR;
 }
 
 /**
@@ -297,22 +306,117 @@ function decode(chunks, totalBytes) {
 }
 
 /**
+ * 运行 wchat_bootstrap（自动发现微信数据目录 + 从微信进程提取密钥 + 生成数据目录）。
+ * 失败时抛出来自 Python 端的可操作错误文案。
+ */
+function runBootstrap(python, source, dataDir, signal) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(python.command, [...python.baseArgs, "-m", "wchat_bootstrap", "--data-dir", dataDir], {
+      cwd: source,
+      env: { ...process.env, PYTHONPATH: source, PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8" },
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const stdout = [];
+    const stderr = [];
+    let outBytes = 0;
+    let errBytes = 0;
+    child.stdout.on("data", (chunk) => {
+      if (outBytes < 1024 * 1024) {
+        outBytes += chunk.length;
+        stdout.push(chunk);
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      if (errBytes < 1024 * 1024) {
+        errBytes += chunk.length;
+        stderr.push(chunk);
+      }
+    });
+    const kill = () => {
+      try {
+        child.kill();
+      } catch {
+        // 进程可能已经退出
+      }
+    };
+    const deadline = setTimeout(kill, ENV_SETUP_TIMEOUT_MS);
+    if (signal) {
+      if (signal.aborted) kill();
+      else signal.addEventListener("abort", kill, { once: true });
+    }
+    const settle = (fn, value) => {
+      clearTimeout(deadline);
+      signal?.removeEventListener("abort", kill);
+      fn(value);
+    };
+    child.on("error", (error) => settle(reject, new Error(`无法启动 Python（${python.command}）：${error.message}`)));
+    child.on("close", (code) => {
+      const out = Buffer.concat(stdout, outBytes).toString("utf-8").trim();
+      const err = Buffer.concat(stderr, errBytes).toString("utf-8").trim();
+      if (code === 0) {
+        settle(resolve, out);
+        return;
+      }
+      let message;
+      try {
+        const payload = JSON.parse(out);
+        if (payload && typeof payload.error === "string" && payload.error) message = payload.error;
+      } catch {
+        // stdout 不是 JSON，退回 stderr 摘要
+      }
+      settle(reject, new Error(`微信数据自动引导失败：${message || err.slice(0, 600) || `exit=${code}`}`));
+    });
+  });
+}
+
+/** 自动引导数据目录：已生成过则直接复用，否则调用 wchat_bootstrap 生成到插件自管目录。 */
+async function ensureAutoDataDir(config, { signal } = {}) {
+  if (existsSync(join(PLUGIN_DATA_DIR, "account_keys.json"))) return PLUGIN_DATA_DIR;
+  const coreDir = resolveCoreDir(config);
+  const source = resolvePythonSource(config, coreDir);
+  const python = await resolveInterpreter(config, coreDir, signal);
+  await runBootstrap(python, source, PLUGIN_DATA_DIR, signal);
+  return PLUGIN_DATA_DIR;
+}
+
+function missingDataDirError() {
+  return new Error(
+    "未配置微信数据目录，且自动引导已关闭。请把插件配置 dataDir（或环境变量 WCHAT_DATA_DIR）指向包含 account_keys.json 与 databases/ 的目录；" +
+      "若本机装有微信 4.x 且已登录，保持 autoBootstrap 开启（默认）即可自动发现数据目录并提取密钥。详见插件 README。",
+  );
+}
+
+/** 用已解析的数据目录重写 flags 中的 --data-dir（工具层可能在自动引导前拼了空值）。 */
+function withDataDir(flags, dataDir) {
+  const rest = [];
+  for (let index = 0; index < flags.length; index += 1) {
+    if (flags[index] === "--data-dir") {
+      index += 1;
+      continue;
+    }
+    rest.push(flags[index]);
+  }
+  return ["--data-dir", dataDir, ...rest];
+}
+
+/**
  * 运行一次 `python -m wchat_core <command>`（必要时先自动准备 Python 环境）。
  * 密钥不在此层出现：解密密钥始终由 Python 端从数据目录的 account_keys.json 自行读取。
  * @returns {Promise<{code: number|null, signal: string|null, timedOut: boolean, truncated: boolean, stdout: string, stderr: string}>}
  */
 export async function runWchatCore(config, command, flags, { signal, timeoutMs } = {}) {
-  const dataDir = resolveDataDir(config);
+  let dataDir = resolveDataDir(config);
   if (!dataDir) {
-    throw new Error(
-      "未配置微信数据目录。请把插件配置 dataDir 或环境变量 WCHAT_DATA_DIR 指向包含 account_keys.json 与 databases/ 的微信数据导出目录（生成方式见插件 README「在其他电脑部署」）。",
-    );
+    if (config.autoBootstrap === false) throw missingDataDirError();
+    dataDir = await ensureAutoDataDir(config, { signal });
   }
+  if (!dataDir) throw missingDataDirError();
   validateDataDir(dataDir);
   const coreDir = resolveCoreDir(config);
   const source = resolvePythonSource(config, coreDir);
   const python = await resolveInterpreter(config, coreDir, signal);
-  const args = [...python.baseArgs, "-m", "wchat_core", command, ...flags];
+  const args = [...python.baseArgs, "-m", "wchat_core", command, ...withDataDir(flags, dataDir)];
   const child = spawn(python.command, args, {
     cwd: source,
     // 完整透传宿主环境：若用户自设了 WCHAT_DB_KEY/WCHAT_DATA_DIR，属 CLI 设计内的合法来源；

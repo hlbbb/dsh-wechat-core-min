@@ -42,7 +42,7 @@ async function expectError(label, config, needle) {
   }
 }
 
-await expectError("未配置 dataDir", {}, "未配置微信数据目录");
+await expectError("未配置 dataDir（关闭自动引导）", { autoBootstrap: false }, "未配置微信数据目录");
 await expectError("目录不存在", { dataDir: missingDir }, "微信数据目录不存在");
 await expectError("缺 account_keys.json", { dataDir: emptyDir }, "缺少 account_keys.json");
 
