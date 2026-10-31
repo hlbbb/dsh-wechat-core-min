@@ -51,17 +51,26 @@ def _unpad_pkcs7(data: bytes) -> bytes:
 
 
 def decrypt_image_dat(data: bytes, xor_key: int, aes_key: str) -> bytes:
-    """解密微信 4.x 的图片 .dat（V2 = AES-128-ECB + 原始段 + XOR 段；旧格式 = 整文件 XOR）。"""
+    """解密微信 4.x 的图片 .dat（V2 = AES-128-ECB + 原始段 + XOR 段；旧格式 = 整文件 XOR）。
+
+    aes_size 为密文长度，需按 PKCS#7 规则补齐到 16 字节块（恰好对齐时再加一整块填充块），
+    否则原始段起点会偏移 16 字节、PNG 主体损坏（缩略图因长度不对齐而恰好正常）。
+    """
     if len(data) < 16 or data[:6] != V2_MAGIC:
         return _xor_bytes(data, xor_key)
     signature, aes_size, xor_size = struct.unpack("<6sLLx", data[:15])
-    if aes_size <= 0 or aes_size % 16 or 15 + aes_size > len(data):
+    if aes_size <= 0:
+        return b""
+    padded_size = aes_size + (16 - aes_size % 16)
+    if 15 + padded_size > len(data):
+        padded_size = aes_size  # 兼容未额外填充的旧变体
+    if padded_size % 16 or 15 + padded_size > len(data):
         return b""
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
     rest = data[15:]
-    aes_data = rest[:aes_size]
-    tail = rest[aes_size:]
+    aes_data = rest[:padded_size]
+    tail = rest[padded_size:]
     decryptor = Cipher(algorithms.AES(aes_key.encode("utf-8")[:16]), modes.ECB()).decryptor()
     plain = _unpad_pkcs7(decryptor.update(aes_data) + decryptor.finalize())
     if xor_size and xor_size <= len(tail):
@@ -179,28 +188,35 @@ def main(argv: list[str] | None = None) -> int:
     full_files = [(p, m) for p, m in image_files if not p.name.endswith("_t.dat")]
     thumb_files = [(p, m) for p, m in image_files if p.name.endswith("_t.dat")]
     used_paths: set[str] = set()
+    decrypted_cache: dict[str, bytes] = {}
+    invalid_paths: set[str] = set()
 
-    def pick_image(iso_time: str, tolerance: float = 180.0):
+    def image_candidates(iso_time: str, tolerance: float = 600.0):
+        """按 |mtime - 消息时间| 升序给出候选（原图优先，其次缩略图）；跳过已用/已判定无效。"""
         try:
             message_ts = datetime.fromisoformat(iso_time).timestamp()
         except Exception:
-            return None
-        best = None
+            return []
+        ranked = []
         for pool, is_thumb in ((full_files, False), (thumb_files, True)):
             for path, mtime in pool:
-                if str(path) in used_paths:
+                key = str(path)
+                if key in used_paths or key in invalid_paths:
                     continue
                 delta = abs(mtime - message_ts)
-                if delta > tolerance:
-                    continue
-                if best is None or delta < best[0]:
-                    best = (delta, path, is_thumb)
-            if best is not None:
-                break
-        if best is None:
-            return None
-        used_paths.add(str(best[1]))
-        return best[1], best[2]
+                if delta <= tolerance:
+                    ranked.append((delta, 0 if not is_thumb else 1, path, is_thumb))
+        ranked.sort(key=lambda item: (item[0], item[1]))
+        return [(path, is_thumb) for _delta, _t, path, is_thumb in ranked]
+
+    def decrypt_cached(path: Path) -> bytes:
+        key = str(path)
+        if key not in decrypted_cache:
+            try:
+                decrypted_cache[key] = decrypt_image_dat(path.read_bytes(), image_keys[0], image_keys[1])
+            except Exception:
+                decrypted_cache[key] = b""
+        return decrypted_cache[key]
 
     def save_bytes(name: str, data: bytes) -> Path:
         target = out_dir / name
@@ -225,19 +241,19 @@ def main(argv: list[str] | None = None) -> int:
                 if image_keys is None:
                     skipped.append({"kind": "image", "time": iso_time, "reason": "未获取到本机图片密钥（kvcomm 未命中）"})
                     continue
-            picked = pick_image(iso_time)
+            picked = None
+            for candidate, is_thumb in image_candidates(iso_time):
+                data = decrypt_cached(candidate)
+                ext_candidate = detect_image_ext(data or b"")
+                if data and ext_candidate:
+                    picked = (candidate, is_thumb, data, ext_candidate)
+                    break
+                invalid_paths.add(str(candidate))
             if picked is None:
                 skipped.append({"kind": "image", "time": iso_time, "reason": "本地无对应的图片文件（可能已过期/未下载）"})
                 continue
-            candidate, is_thumb = picked
-            try:
-                data = decrypt_image_dat(candidate.read_bytes(), image_keys[0], image_keys[1])
-            except Exception:
-                data = b""
-            ext = detect_image_ext(data or b"")
-            if not data or not ext:
-                skipped.append({"kind": "image", "time": iso_time, "reason": "图片解密失败"})
-                continue
+            candidate, is_thumb, data, ext = picked
+            used_paths.add(str(candidate))
             suffix = "_thumb" if is_thumb else ""
             path = save_bytes(f"{stamp}_{sender}_image{suffix}_{candidate.stem[:8]}{ext}", data)
             saved.append({"kind": "image", "time": iso_time, "sender": message.get("sender"), "path": str(path), "size": len(data), "thumb": is_thumb, "source": candidate.name})
@@ -267,10 +283,12 @@ def main(argv: list[str] | None = None) -> int:
             if matched_path is None:
                 skipped.append({"kind": "file", "time": iso_time, "reason": f"未找到本地文件：{title or '(无标题)'}"})
                 continue
-            target = out_dir / f"{stamp}_{sender}_file_{sanitize_name(matched_path.name)}"
+            base_name = f"{stamp}_{sender}_file_{sanitize_name(matched_path.name)}"
+            target = out_dir / base_name
             index = 1
+            stem, suffix = Path(base_name).stem, Path(base_name).suffix
             while target.exists():
-                target = out_dir / f"{Path(target).stem.split('-')[0]}-{index}{target.suffix}"
+                target = out_dir / f"{stem}-{index}{suffix}"
                 index += 1
             shutil.copyfile(matched_path, target)
             saved.append({"kind": "file", "time": iso_time, "sender": message.get("sender"), "path": str(target), "size": target.stat().st_size, "source": matched_path.name})

@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 pip/
 *.log
+# 导出的聊天媒体与预览（含聊天内容，禁止入库/上传）
+wechat-media/
+wechat-media-*/
+media-preview/
