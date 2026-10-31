@@ -20,7 +20,7 @@
 - 否则用探测到的系统 Python 在 `%LOCALAPPDATA%\dsh-wechat-core-min\runtime` 创建专用虚拟环境，并自动安装 `cryptography` / `zstandard`（需联网一次，之后完全离线可用）；
 - 环境准备幂等，失败（如网络中断）后重试调用即可续装。
 
-微信数据目录的来源：在装有微信 4.x 的电脑上用主程序导出（生成 `account_keys.json` 与 `databases/`）；也可以把现有 `output` 目录整个拷贝到目标电脑使用——`_source.json` 指向的原始库路径在新电脑上失效时，会自动退回解密快照模式（数据截止到拷贝时刻）。
+微信数据目录的来源：**必须由微信数据导出主程序在装有微信 4.x 的电脑上生成**（数据库密钥只能从本机微信提取，无法跨设备凭空获得）。推荐用 [WeChatDataAnalysis](https://github.com/LifeArchiveProject/WeChatDataAnalysis) 桌面安装包（[Release 下载 `Setup.exe`](https://github.com/LifeArchiveProject/WeChatDataAnalysis/releases/latest)）：安装启动后完成一次密钥捕获与解密，即在本机生成含 `account_keys.json` 与 `databases/` 的输出目录。也可以把已有机器的 `output` 目录整个拷贝过来使用——`_source.json` 指向的原始库路径在新电脑上失效时，会自动退回解密快照模式（数据截止拷贝时刻，不会更新；要实时必须在本机微信上生成）。
 
 完全找不到 Python 时，报错会给出安装指引；也可用 `pythonExecutable` 直接指定解释器路径。内置源码的同步方式见「开发自测」。
 
