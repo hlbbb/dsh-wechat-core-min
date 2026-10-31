@@ -16,15 +16,15 @@ export const Config = z.object({
   coreDir: z
     .string()
     .default("")
-    .description("wchat-core 项目目录（需含 wchat_core Python 包，推荐同时有 .venv）。留空使用内置默认路径。"),
+    .description("wchat-core 项目目录（需含 wchat_core Python 包，推荐有 .venv）。留空时若默认路径存在则用之，否则回退插件内置源码。"),
   pythonExecutable: z
     .string()
     .default("")
-    .description("Python 解释器路径。留空时自动探测 coreDir 下的 .venv\\Scripts\\python.exe，再回退 PATH 中的 python。"),
+    .description("Python 解释器路径。留空自动探测：coreDir 的 .venv → 自动运行时 venv（%LOCALAPPDATA%）→ 系统 python/python3/py（缺依赖自动建环境）。"),
   timeoutMs: z
     .number()
     .default(180000)
-    .description("单次 wchat-core 调用的超时毫秒数；首次解密大数据库可能耗时较长。"),
+    .description("单次 wchat-core CLI 调用的超时毫秒数；首次解密大数据库可能耗时较长。工具调用的总预算会在此之上自动加 10 分钟首次环境准备（创建虚拟环境、安装依赖）余量。"),
 });
 
 /**

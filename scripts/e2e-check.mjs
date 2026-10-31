@@ -6,14 +6,17 @@ import {
   parseCliResult,
   resolveCoreDir,
   resolveDataDir,
-  resolvePythonExecutable,
+  resolveInterpreter,
+  resolvePythonSource,
   runWchatCore,
 } from "../runner.js";
 
 const config = {};
 
-console.log("coreDir :", resolveCoreDir(config));
-console.log("python  :", resolvePythonExecutable(config));
+const coreDir = resolveCoreDir(config);
+console.log("coreDir :", coreDir);
+console.log("python  :", JSON.stringify(await resolveInterpreter(config, coreDir)));
+console.log("source  :", resolvePythonSource(config, coreDir));
 console.log("dataDir :", resolveDataDir(config));
 
 const common = ["--data-dir", resolveDataDir(config), "--compact"];

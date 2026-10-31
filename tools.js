@@ -48,7 +48,10 @@ async function callCli(config, command, flags, exec, { asText = false } = {}) {
 
 /** 创建全部工具定义；插件在 apply 中逐个 ctx.tools.register。 */
 export function createTools(config) {
-  const timeoutMs = config.timeoutMs;
+  // 工具调用的总预算 = 常规 CLI 超时 + 首次自动准备环境（创建 venv、安装依赖）的余量；
+  // 常规调用实际几秒内完成，上限只在首次部署或解密大库时起作用。
+  const cliTimeoutMs = Number(config.timeoutMs) > 0 ? Number(config.timeoutMs) : 180000;
+  const timeoutMs = cliTimeoutMs + 600000;
   const tools = [];
 
   tools.push(
