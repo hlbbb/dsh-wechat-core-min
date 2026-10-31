@@ -1,6 +1,7 @@
 import { defineTool, TOOL_ABORTED } from "@deepseek-ai/dsh-tools";
 import { HarnessError } from "@deepseek-ai/dsh-llm";
-import { parseCliResult, resolveDataDir, runWchatCore } from "./runner.js";
+import { join } from "node:path";
+import { parseCliResult, resolveDataDir, runWchatCore, runWchatMedia } from "./runner.js";
 
 const DEFAULT_LIMIT = 200;
 
@@ -186,6 +187,60 @@ export function createTools(config) {
         const flags = commonFlags(config, { account: args.account });
         flags.push("--chat", String(args.chat));
         return callCli(config, "group-members", flags, exec);
+      },
+    }),
+  );
+
+  tools.push(
+    defineTool({
+      name: "wchat_export_media",
+      description:
+        "导出指定微信聊天的文件原件与图片到本地目录：文件按原件复制；图片用本机图片密钥自动解密为 png/jpg（微信已清理的原图会回退导出缩略图）。默认保存到当前会话工作目录下的 wechat-media/<聊天名>/，返回每个文件的本地路径。只读操作：仅复制/解密微信本地文件，不修改原始数据；需实时模式（本机微信运行中）。",
+      parameters: {
+        chat: { type: "string", required: true, description: "聊天名称或 username（联系人昵称、群名、wxid、xxx@chatroom）。" },
+        types: {
+          type: "array",
+          items: { type: "string", enum: ["image", "file"] },
+          description: "导出类型，默认图片+文件。",
+        },
+        date: { type: "string", description: "today（默认）/ YYYY-MM-DD / all；date=all 时忽略 start/end/days。" },
+        days: { type: "integer", description: "最近 N 天（含今天）。" },
+        start: { type: "string", description: "起始日期/时间（ISO 格式）。" },
+        end: { type: "string", description: "结束日期/时间（ISO 格式）。" },
+        limit: { type: "integer", description: "每种类型最多导出条数，默认 50。" },
+        outDir: { type: "string", description: "输出目录；默认当前会话工作目录下的 wechat-media。" },
+        account: { type: "string", description: "账号（wxid）；缺省自动选择。" },
+      },
+      output: jsonOutput,
+      timeoutMs,
+      async execute(args, exec) {
+        const workspace = exec.agent?.session?.header?.cwd || process.cwd();
+        const outDir = String(args.outDir ?? "").trim() || join(workspace, "wechat-media");
+        const flags = commonFlags(config, { account: args.account });
+        flags.push("--chat", String(args.chat));
+        const types = Array.isArray(args.types) && args.types.length ? args.types.join(",") : "image,file";
+        flags.push("--types", types);
+        flags.push("--limit", String(Number.isFinite(args.limit) ? args.limit : 50));
+        const hasRange = String(args.start ?? "").trim() || String(args.end ?? "").trim();
+        if (hasRange) {
+          if (String(args.start ?? "").trim()) flags.push("--start", String(args.start).trim());
+          if (String(args.end ?? "").trim()) flags.push("--end", String(args.end).trim());
+        } else if (Number.isFinite(args.days)) {
+          flags.push("--days", String(args.days));
+        } else if (String(args.date ?? "").trim()) {
+          flags.push("--date", String(args.date).trim());
+        }
+        flags.push("--out", outDir);
+        try {
+          const result = await runWchatMedia(config, flags, {
+            signal: exec.signal,
+            timeoutMs: Math.max(Number(config.timeoutMs) || 0, 600000),
+          });
+          return parseCliResult(result, "wchat_media", { label: "wchat_media" });
+        } catch (error) {
+          if (exec.signal?.aborted) throw toolAborted("wchat_media");
+          throw error;
+        }
       },
     }),
   );

@@ -405,7 +405,7 @@ function withDataDir(flags, dataDir) {
  * 密钥不在此层出现：解密密钥始终由 Python 端从数据目录的 account_keys.json 自行读取。
  * @returns {Promise<{code: number|null, signal: string|null, timedOut: boolean, truncated: boolean, stdout: string, stderr: string}>}
  */
-export async function runWchatCore(config, command, flags, { signal, timeoutMs } = {}) {
+export async function runPluginModule(config, moduleName, buildArgs, { signal, timeoutMs } = {}) {
   let dataDir = resolveDataDir(config);
   if (!dataDir) {
     if (config.autoBootstrap === false) throw missingDataDirError();
@@ -416,7 +416,7 @@ export async function runWchatCore(config, command, flags, { signal, timeoutMs }
   const coreDir = resolveCoreDir(config);
   const source = resolvePythonSource(config, coreDir);
   const python = await resolveInterpreter(config, coreDir, signal);
-  const args = [...python.baseArgs, "-m", "wchat_core", command, ...withDataDir(flags, dataDir)];
+  const args = [...python.baseArgs, "-m", moduleName, ...buildArgs(dataDir)];
   const child = spawn(python.command, args, {
     cwd: source,
     // 完整透传宿主环境：若用户自设了 WCHAT_DB_KEY/WCHAT_DATA_DIR，属 CLI 设计内的合法来源；
@@ -485,6 +485,16 @@ export async function runWchatCore(config, command, flags, { signal, timeoutMs }
 
 const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
 
+/** 运行 `python -m wchat_core <command> ...`（保留命令在前、选项在后的 argparse 语义）。 */
+export function runWchatCore(config, command, flags, opts = {}) {
+  return runPluginModule(config, "wchat_core", (dataDir) => [command, ...withDataDir(flags, dataDir)], opts);
+}
+
+/** 运行 `python -m wchat_media ...`（媒体导出：文件原件 + 图片解密）。 */
+export function runWchatMedia(config, flags, opts = {}) {
+  return runPluginModule(config, "wchat_media", (dataDir) => withDataDir(flags, dataDir), opts);
+}
+
 function extractCliError(stdout) {
   try {
     const payload = JSON.parse(stdout);
@@ -500,10 +510,12 @@ function extractCliError(stdout) {
 /**
  * 把一次 CLI 运行解析成结果；JSON 命令解析为对象，文本命令（md/txt）原样返回字符串。
  * 失败时抛出带原因的中文错误。
+ * @param {string} label 错误前缀（默认 wchat-core；媒体模块传 wchat_media）
  */
-export function parseCliResult(result, command, { asText = false } = {}) {
+export function parseCliResult(result, command, { asText = false, label = "wchat-core" } = {}) {
+  const prefix = label === "wchat-core" ? `${label} ${command}` : label;
   if (result.timedOut) {
-    throw new Error(`wchat-core ${command} 超时被终止。首次调用某账号时需要解密数据库，可能耗时较长；可加大插件配置 timeoutMs 后重试。`);
+    throw new Error(`${prefix} 超时被终止。首次调用某账号时需要解密数据库，可能耗时较长；可加大插件配置 timeoutMs 后重试。`);
   }
   if (result.code === 0) {
     if (asText) {
@@ -515,7 +527,7 @@ export function parseCliResult(result, command, { asText = false } = {}) {
       return JSON.parse(result.stdout);
     } catch {
       throw new Error(
-        `wchat-core ${command} 退出码为 0，但输出无法按 JSON 解析${result.truncated ? "（输出超过 32MB 上限已被截断，请用 limit/offset 分页）" : ""}：${result.stdout.slice(0, 400)}`,
+        `${prefix} 退出码为 0，但输出无法按 JSON 解析${result.truncated ? "（输出超过 32MB 上限已被截断，请用 limit/offset 分页）" : ""}：${result.stdout.slice(0, 400)}`,
       );
     }
   }
@@ -525,12 +537,10 @@ export function parseCliResult(result, command, { asText = false } = {}) {
     const trimmed = cliError.trim();
     if (/^\d+$/.test(trimmed) || trimmed.length <= 8) {
       const detail = (result.stderr || "").trim();
-      throw new Error(
-        `wchat-core ${command} 失败（code=${trimmed}）${detail ? `：${detail.slice(0, 600)}` : "，且无更多错误输出。"}`,
-      );
+      throw new Error(`${prefix} 失败（code=${trimmed}）${detail ? `：${detail.slice(0, 600)}` : "，且无更多错误输出。"}`);
     }
-    throw new Error(`wchat-core ${command} 失败：${cliError}`);
+    throw new Error(`${prefix} 失败：${cliError}`);
   }
   const detail = (result.stderr || result.stdout || "(无输出)").trim();
-  throw new Error(`wchat-core ${command} 异常退出（code=${result.code}${result.signal ? `, signal=${result.signal}` : ""}）：${detail.slice(0, 600)}`);
+  throw new Error(`${prefix} 异常退出（code=${result.code}${result.signal ? `, signal=${result.signal}` : ""}）：${detail.slice(0, 600)}`);
 }
