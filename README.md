@@ -10,7 +10,7 @@
 
 插件已内置 wchat_core 源码并自动准备 Python 依赖，新电脑无需 clone 任何项目：
 
-1. 确保 Agent 宿主环境有 Python 3.11+（`python` / `python3` / `py` 任一命令可用即可）。
+1. 确保 Agent 宿主环境有 Python 3.11+。支持三种来源：PATH 上的 `python`/`python3`/`py`；PEP 514 注册表登记的解释器（python.org 官方安装、Anaconda/Miniconda 均会登记，未加 PATH 也能找到）；以及 `%USERPROFILE%\anaconda3|miniconda3` 等常见 Anaconda 目录。
 2. 安装插件：`dsh plugin --profile desktop add "github:hlbbb/dsh-wechat-core-min"`。
 3. 准备微信数据目录，并在 profile 补丁层给插件行配置 `dataDir`（见下文配置示例）。
 

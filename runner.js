@@ -59,12 +59,14 @@ function venvInterpreter(venvDir) {
 /** 探测结果缓存：每个宿主进程只探测一次。 */
 let interpreterProbe;
 
-const PROBE_ALIVE_CODE = "import sys; print('PYOK')";
+const PROBE_ALIVE_CODE = "import sys; print('PYOK', sys.version_info[:2])";
 const PROBE_DEPS_CODE = "import cryptography, zstandard";
+/** wchat_core 需要的最低 Python 版本（store.py 使用了 3.9+ 语法，并按上游声明取 3.11）。 */
+const MIN_PYTHON_VERSION = { major: 3, minor: 11 };
 
 /**
- * 探活要求 stdout 出现 PYOK 标记：Windows Store 的 python.exe stub 会以 exit 9009 静默失败、
- * 不产生输出，仅凭「能启动、退出码非 0」无法把它和真解释器区分开。
+ * 探活要求 stdout 出现 PYOK 标记与版本号：Windows Store 的 python.exe stub 会以 exit 9009 静默失败、
+ * 不产生输出，仅凭「能启动、退出码非 0」无法把它和真解释器区分开；版本号用于过滤 <3.11 的旧解释器。
  */
 function probeOnce(command, baseArgs, code, { expectMark = false } = {}) {
   const result = spawnSync(command, [...baseArgs, "-c", code], {
@@ -72,17 +74,99 @@ function probeOnce(command, baseArgs, code, { expectMark = false } = {}) {
     windowsHide: true,
     encoding: "utf-8",
   });
-  const ok = !result.error && result.status === 0 && (!expectMark || String(result.stdout ?? "").includes("PYOK"));
+  const text = String(result.stdout ?? "");
+  const marked = !result.error && result.status === 0 && text.includes("PYOK");
+  const ok = marked && (!expectMark || meetsMinVersion(text));
   return { ok };
 }
 
-/** 探测 PATH 上的系统解释器；返回 {command, baseArgs, hasDeps} 或 null（一个可用解释器都没有）。 */
+function meetsMinVersion(text) {
+  const match = text.match(/PYOK\s*\((\d+),\s*(\d+)\)/);
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  return major > MIN_PYTHON_VERSION.major ||
+    (major === MIN_PYTHON_VERSION.major && minor >= MIN_PYTHON_VERSION.minor);
+}
+
+/** Anaconda/Miniconda 的常见安装目录（注册表探测失败时的兜底）。 */
+const COMMON_CONDA_DIRS = [
+  join(homedir(), "anaconda3"),
+  join(homedir(), "miniconda3"),
+  join(process.env.ProgramData || "C:\\ProgramData", "Anaconda3"),
+  join(process.env.ProgramData || "C:\\ProgramData", "miniconda3"),
+  join(homedir(), "AppData", "Local", "Continuum", "anaconda3"),
+];
+
+/**
+ * PEP 514 注册表探测：python.org 官方安装、Anaconda/Miniconda 等发行版都会在
+ * HKCU/HKLM\Software\Python\<厂商>\<版本>\InstallPath 登记，即使没加入 PATH。
+ * reg.exe 输出用系统代码页（中文系统 GBK），默认值名本地化为「(默认)」。
+ * 返回去重且真实存在的 python.exe 绝对路径列表。
+ */
+function createConsoleDecoder() {
+  try {
+    const gbk = new TextDecoder("gbk");
+    return (buffer) => gbk.decode(buffer);
+  } catch {
+    return (buffer) => new TextDecoder("utf-8", { fatal: false }).decode(buffer);
+  }
+}
+
+export function probeRegistryPythonPaths() {
+  const paths = [];
+  const decodeConsole = createConsoleDecoder();
+  for (const hive of ["HKCU", "HKLM"]) {
+    const query = spawnSync("reg", ["query", `${hive}\\Software\\Python`, "/s"], {
+      timeout: 15000,
+      windowsHide: true,
+      encoding: "buffer",
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    if (query.error || query.status !== 0 || !query.stdout) continue;
+    let inInstallPath = false;
+    let dir = "";
+    let exe = "";
+    const flush = () => {
+      if (exe || dir) paths.push(exe || join(dir, "python.exe"));
+      inInstallPath = false;
+      dir = "";
+      exe = "";
+    };
+    for (const line of decodeConsole(query.stdout).split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (/^HKEY_/i.test(trimmed)) {
+        flush();
+        inInstallPath = /\\InstallPath$/i.test(trimmed);
+        continue;
+      }
+      if (!inInstallPath) continue;
+      const match = trimmed.match(/^(\(Default\)|\(默认\)|ExecutablePath)\s+REG_SZ\s+(.+)$/i);
+      if (!match) continue;
+      const value = match[2].trim();
+      if (/^ExecutablePath$/i.test(match[1])) exe = value;
+      else dir = value;
+    }
+    flush();
+  }
+  return [...new Set(paths)].filter((p) => p && existsSync(p));
+}
+
+/**
+ * 探测 PATH 上的系统解释器；返回 {command, baseArgs, hasDeps} 或 null（一个可用解释器都没有）。
+ * 候选顺序：PATH 上的 python/python3/py → PEP 514 注册表登记 → 常见 Anaconda/Miniconda 目录。
+ */
 export function probeSystemInterpreter() {
   if (interpreterProbe !== undefined) return interpreterProbe;
   const candidates = [
     { command: "python", baseArgs: [] },
     { command: "python3", baseArgs: [] },
     { command: "py", baseArgs: ["-3"] },
+    ...probeRegistryPythonPaths().map((command) => ({ command, baseArgs: [] })),
+    ...COMMON_CONDA_DIRS.filter((dir) => existsSync(join(dir, "python.exe"))).map((dir) => ({
+      command: join(dir, "python.exe"),
+      baseArgs: [],
+    })),
   ];
   let found;
   for (const candidate of candidates) {
@@ -98,10 +182,11 @@ export function probeSystemInterpreter() {
 
 function missingInterpreterError() {
   return new Error(
-    "未找到可用的 Python 解释器（尝试过 python / python3 / py）。本插件需要 Python 3.11+ 来运行 wchat-core：" +
+    "未找到可用的 Python 解释器（已尝试 PATH 上的 python / python3 / py、注册表登记的解释器与常见 Anaconda/Miniconda 安装位置）。" +
+      "本插件需要 Python 3.11+ 来运行 wchat-core：" +
       "① 安装 Python（winget install Python.Python.3.12，或从 https://www.python.org/downloads/ 安装并勾选 Add to PATH）；" +
-      "② 或在插件配置 pythonExecutable 中指定解释器路径。" +
-      "首次调用会自动创建虚拟环境并安装 cryptography / zstandard（需联网一次）。",
+      "② 若使用 Anaconda/Miniconda，可在插件配置 pythonExecutable 填其 python.exe 完整路径（如 C:\\Users\\<你>\\anaconda3\\python.exe）；" +
+      "③ 首次调用会自动创建虚拟环境并安装 cryptography / zstandard（需联网一次）。",
   );
 }
 
